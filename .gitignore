@@ -1,0 +1,59 @@
+# Credentials and sensitive files
+config/credentials.json
+config/oauth2.json
+*.token
+
+# Database files
+*.db
+*.db-journal
+
+# Runtime-generated data (these fill up with personal/league-specific
+# content once the tracker actually runs - not meant for version control)
+data/player_photos/
+data/recaps/
+data/exports/
+# Demo images used in documentation ARE tracked:
+!data/examples/
+
+# Logs
+logs/*.log
+logs/*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Exports (optional - uncomment if you don't want to track exports)
+# data/exports/
