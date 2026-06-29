@@ -193,9 +193,18 @@ class RecapVisualizer:
         
         y_pos = np.arange(len(categories))
         
-        # Extract values
-        team1_vals = [float(team1_stats.get(cat, 0)) for cat in categories]
-        team2_vals = [float(team2_stats.get(cat, 0)) for cat in categories]
+        # Extract values — normalize Yahoo's "-" null sentinel to 0
+        team1_vals = []
+        team2_vals = []
+        for cat in categories:
+            try:
+                team1_vals.append(float(team1_stats.get(cat, 0) or 0))
+            except (ValueError, TypeError):
+                team1_vals.append(0.0)
+            try:
+                team2_vals.append(float(team2_stats.get(cat, 0) or 0))
+            except (ValueError, TypeError):
+                team2_vals.append(0.0)
         
         # Determine bar colors based on who's winning each category
         team1_colors = []
@@ -421,19 +430,20 @@ class RecapVisualizer:
                             })
             
             # Find top individual contributors
-            all_players = matchup['team1_players'] + matchup['team2_players']
-            for player in all_players:
-                # Calculate a simple "impact score" - sum of positive deltas
-                impact = sum(v for v in player['delta'].values()
-                           if isinstance(v, (int, float)) and v > 0)
-                if impact > 0:
-                    highlights['top_performers'].append({
-                        'player_name': player['player_name'],
-                        'team': matchup.get('team1_name') if player in matchup['team1_players']
-                                else matchup.get('team2_name'),
-                        'impact_score': impact,
-                        'stats': player['delta']
-                    })
+            for team_name, players in (
+                (matchup['team1_name'], matchup['team1_players']),
+                (matchup['team2_name'], matchup['team2_players']),
+            ):
+                for player in players:
+                    impact = sum(v for v in player['delta'].values()
+                               if isinstance(v, (int, float)) and v > 0)
+                    if impact > 0:
+                        highlights['top_performers'].append({
+                            'player_name': player['player_name'],
+                            'team': team_name,
+                            'impact_score': impact,
+                            'stats': player['delta']
+                        })
         
         # Sort top performers
         highlights['top_performers'].sort(key=lambda p: p['impact_score'], reverse=True)
@@ -489,58 +499,50 @@ class RecapVisualizer:
         Returns:
             PIL Image
         """
-        # Calculate total height needed
+        # Render each figure once and reuse the PIL image for both height calculation and compositing
+        from io import BytesIO
         margin = 40
         title_height = 100
-        chart_heights = []
-        
+        rendered_charts = []
+
         for fig in charts:
-            # Save chart to temporary bytes
-            from io import BytesIO
             buf = BytesIO()
             fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
             buf.seek(0)
-            chart_img = Image.open(buf)
-            chart_heights.append(chart_img.size[1])
+            chart_img = Image.open(buf).copy()
             buf.close()
-        
-        total_height = title_height + sum(chart_heights) + margin * (len(charts) + 2)
-        
+            plt.close(fig)
+            rendered_charts.append(chart_img)
+
+        # Compute resized heights upfront — charts are scaled to new_width when pasted,
+        # so use those dimensions rather than the original matplotlib output size.
+        new_chart_width = width - 2 * margin
+        resized_heights = [int(new_chart_width * img.size[1] / img.size[0]) for img in rendered_charts]
+        total_height = title_height + sum(resized_heights) + margin * (len(rendered_charts) + 2)
+
         if highlights:
-            total_height += 30 * len(highlights) + margin
-        
+            total_height += 35 + 30 * len(highlights) + margin  # 35px for "Key Highlights:" label
+
         # Create canvas
         canvas = Image.new('RGB', (width, total_height), color='#F5F5F5')
         draw = ImageDraw.Draw(canvas)
-        
+
         # Load fonts (cross-platform: Helvetica/Arial/Liberation/DejaVu)
         title_font = load_font(40, bold=True)
         text_font = load_font(20, bold=False)
-        
+
         # Draw title
         title_bbox = draw.textbbox((0, 0), title, font=title_font)
         title_width = title_bbox[2] - title_bbox[0]
         draw.text(((width - title_width) / 2, margin), title,
                  fill='#1A237E', font=title_font)
-        
-        # Add charts
+
+        # Add charts — resize to new_chart_width, use precomputed heights
         y_offset = title_height + margin
-        for i, fig in enumerate(charts):
-            buf = BytesIO()
-            fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-            buf.seek(0)
-            chart_img = Image.open(buf)
-            
-            # Resize to fit width
-            aspect = chart_img.size[1] / chart_img.size[0]
-            new_width = width - 2 * margin
-            new_height = int(new_width * aspect)
-            chart_img = chart_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            
+        for chart_img, new_height in zip(rendered_charts, resized_heights):
+            chart_img = chart_img.resize((new_chart_width, new_height), Image.Resampling.LANCZOS)
             canvas.paste(chart_img, (margin, y_offset))
             y_offset += new_height + margin
-            buf.close()
-            plt.close(fig)
         
         # Add highlights text
         if highlights:
@@ -594,32 +596,25 @@ class RecapVisualizer:
         y_pos += 40
         
         # BATTING SECTION
-        if composite_leaders.get('batters'):
+        batters_data = composite_leaders.get('batters', {})
+        best_batters = batters_data.get('best', [])
+        worst_batters = batters_data.get('worst', [])
+        if best_batters and worst_batters:
             draw.text((img_width//2, y_pos), "BATTING", font=heading_font, fill='#1976D2', anchor='mt')
             y_pos += 40
-            
-            # Best Batter (left side)
-            best_batter = composite_leaders['batters']['best'][0]
-            self._draw_player_card(img, draw, best_batter, 100, y_pos, "BEST", text_font, score_font)
-            
-            # Worst Batter (right side)
-            worst_batter = composite_leaders['batters']['worst'][0]
-            self._draw_player_card(img, draw, worst_batter, 550, y_pos, "WORST", text_font, score_font)
-            
+            self._draw_player_card(img, draw, best_batters[0], 100, y_pos, "BEST", text_font, score_font)
+            self._draw_player_card(img, draw, worst_batters[0], 550, y_pos, "WORST", text_font, score_font)
             y_pos += 200
-        
+
         # PITCHING SECTION
-        if composite_leaders.get('pitchers'):
+        pitchers_data = composite_leaders.get('pitchers', {})
+        best_pitchers = pitchers_data.get('best', [])
+        worst_pitchers = pitchers_data.get('worst', [])
+        if best_pitchers and worst_pitchers:
             draw.text((img_width//2, y_pos), "PITCHING", font=heading_font, fill='#D32F2F', anchor='mt')
             y_pos += 40
-            
-            # Best Pitcher (left side)
-            best_pitcher = composite_leaders['pitchers']['best'][0]
-            self._draw_player_card(img, draw, best_pitcher, 100, y_pos, "BEST", text_font, score_font)
-            
-            # Worst Pitcher (right side)
-            worst_pitcher = composite_leaders['pitchers']['worst'][0]
-            self._draw_player_card(img, draw, worst_pitcher, 550, y_pos, "WORST", text_font, score_font)
+            self._draw_player_card(img, draw, best_pitchers[0], 100, y_pos, "BEST", text_font, score_font)
+            self._draw_player_card(img, draw, worst_pitchers[0], 550, y_pos, "WORST", text_font, score_font)
         
         return img
     
@@ -685,10 +680,77 @@ class RecapVisualizer:
         score_text = f"Score: {player['composite_score']:.1f}"
         draw.text((text_x, text_y), score_text, font=score_font, fill='black')
     
+    def _create_stat_leaders_image(self, stat_leaders, week):
+        """
+        Render per-stat leaders and trailers as a PIL image for the weekly recap.
+
+        Shows the best and worst player for each batting and pitching stat,
+        laid out as two columns: green for leader (left), red for trailer (right).
+        """
+        batting_present = [s for s in BATTING_STATS if s in stat_leaders]
+        pitching_present = [s for s in PITCHING_STATS if s in stat_leaders]
+
+        if not batting_present and not pitching_present:
+            return None
+
+        margin = 30
+        row_h = 30
+        section_h = 42
+        title_h = 65
+
+        lines = []
+        if batting_present:
+            lines.append(('section', 'BATTING LEADERS'))
+            for stat in batting_present:
+                d = stat_leaders[stat]
+                if d.get('leaders') and d.get('trailers'):
+                    lines.append(('stat', stat, d['leaders'][0], d['trailers'][0]))
+        if pitching_present:
+            lines.append(('section', 'PITCHING LEADERS'))
+            for stat in pitching_present:
+                d = stat_leaders[stat]
+                if d.get('leaders') and d.get('trailers'):
+                    lines.append(('stat', stat, d['leaders'][0], d['trailers'][0]))
+
+        if not lines:
+            return None
+
+        total_h = title_h + margin
+        for line in lines:
+            total_h += section_h if line[0] == 'section' else row_h
+        total_h += margin
+
+        img_width = 1100
+        img = Image.new('RGB', (img_width, total_h), color='#F5F5F5')
+        draw = ImageDraw.Draw(img)
+
+        title_font = load_font(28, bold=True)
+        section_font = load_font(18, bold=True)
+        text_font = load_font(15, bold=False)
+
+        y = margin
+        draw.text((img_width // 2, y), f"Week {week} — Per-Stat Leaders",
+                  font=title_font, fill='#1A237E', anchor='mt')
+        y += title_h
+
+        for line in lines:
+            if line[0] == 'section':
+                draw.text((margin, y), line[1], font=section_font, fill='#1A237E')
+                y += section_h
+            else:
+                _, stat, leader, trailer = line
+                leader_str = f"{stat}  ▲ {leader['player_name']} ({leader['team_name']}) — {leader['stat_value']:.2f}"
+                trailer_str = f"▼ {trailer['player_name']} ({trailer['team_name']}) — {trailer['stat_value']:.2f}"
+                draw.text((margin + 20, y), leader_str, font=text_font, fill='#2E7D32')
+                draw.text((img_width // 2 + 20, y), trailer_str, font=text_font, fill='#C62828')
+                y += row_h
+
+        return img
+
     # ----------------------------------------------------------------
     # Main recap generation methods
     # ----------------------------------------------------------------
-    
+
     def generate_daily_recap_image(self, week, current_date=None, previous_date=None):
         """
         Generate a visual daily recap image.
@@ -734,7 +796,7 @@ class RecapVisualizer:
                 charts.append(fig)
         
         # Add highlight text
-        for performer in highlights['top_performers'][:3]:
+        for performer in highlights.get('top_performers', [])[:3]:
             stats_str = ', '.join([f"{k}: +{v:.1f}" for k, v in performer['stats'].items()
                                   if isinstance(v, (int, float)) and v > 0])
             highlight_texts.append(
@@ -806,7 +868,7 @@ class RecapVisualizer:
         # ----------------------------------------------------------------
         if composite_leaders.get('batters') or composite_leaders.get('pitchers'):
             highlights_img = self._create_player_highlights_image(
-                composite_leaders, 
+                composite_leaders,
                 week,
                 composite_method
             )
@@ -816,6 +878,18 @@ class RecapVisualizer:
                 highlights_img.save(save_path, quality=95)
                 saved_files.append(save_path)
                 logger.info(f"Player highlights saved to {save_path}")
+
+        # ----------------------------------------------------------------
+        # Image 2b: Per-Stat Leaders & Trailers
+        # ----------------------------------------------------------------
+        if stat_leaders:
+            leaders_img = self._create_stat_leaders_image(stat_leaders, week)
+            if leaders_img:
+                filename = f"weekly_recap_w{week}_stat_leaders.png"
+                save_path = self.output_dir / filename
+                leaders_img.save(save_path, quality=95)
+                saved_files.append(save_path)
+                logger.info(f"Stat leaders saved to {save_path}")
         
         # ----------------------------------------------------------------
         # Image 3: Final Matchup Results

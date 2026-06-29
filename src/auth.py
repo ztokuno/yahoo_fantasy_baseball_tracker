@@ -13,6 +13,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+
 class YahooAuthenticator:
     """Handle Yahoo Fantasy Sports API authentication."""
     
@@ -63,12 +64,14 @@ class YahooAuthenticator:
                 self.oauth = OAuth2(None, None, from_file=str(self.oauth_file))
             else:
                 logger.info("Starting OAuth flow - browser will open for authorization")
-                # First time - need to authorize
-                self.oauth = OAuth2(
-                    creds['consumer_key'],
-                    creds['consumer_secret'],
-                    from_file=str(self.oauth_file)
-                )
+                # yahoo_oauth reads consumer creds from from_file, so seed it first
+                self.oauth_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.oauth_file, 'w') as f:
+                    json.dump({
+                        'consumer_key': creds['consumer_key'],
+                        'consumer_secret': creds['consumer_secret'],
+                    }, f)
+                self.oauth = OAuth2(None, None, from_file=str(self.oauth_file))
                 logger.info(f"OAuth tokens saved to {self.oauth_file}")
             
             # Test the connection
@@ -80,6 +83,16 @@ class YahooAuthenticator:
             return self.oauth
             
         except Exception as e:
+            # Remove seed file if it was created without a valid token
+            if self.oauth_file.exists():
+                try:
+                    with open(self.oauth_file) as f:
+                        data = json.load(f)
+                    if 'access_token' not in data:
+                        self.oauth_file.unlink()
+                        logger.debug("Removed incomplete OAuth seed file after failed auth")
+                except Exception:
+                    pass
             logger.error(f"Authentication failed: {e}")
             raise
     

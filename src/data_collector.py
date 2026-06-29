@@ -15,6 +15,17 @@ from src.database import FantasyDatabase
 
 logger = logging.getLogger(__name__)
 
+STAT_MAP = {
+    # Batting
+    '7': 'R', '8': 'H', '9': '1B', '10': '2B', '11': '3B',
+    '12': 'HR', '13': 'RBI', '16': 'SB', '18': 'BB', '20': 'HBP',
+    '3': 'AVG', '6': 'AB', '17': 'CS', '21': 'K_BAT',
+    # Pitching
+    '28': 'W', '32': 'SV', '42': 'K', '26': 'ERA', '27': 'WHIP',
+    '33': 'O', '34': 'H_PIT', '37': 'ER', '39': 'BB_PIT',
+    '41': 'HBP_PIT', '50': 'IP', '29': 'L', '48': 'HLD',
+}
+
 
 class FantasyDataCollector:
     """Collect fantasy baseball data from Yahoo API."""
@@ -77,33 +88,92 @@ class FantasyDataCollector:
             # Get all matchups for the week
             matchups = self.league.matchups(week)
             time.sleep(self.api_delay)  # Be respectful to API
-            
+
             matchup_data = []
-            
-            for matchup in matchups['fantasy_content']['league'][1]['scoreboard']['0']['matchups'].values():
-                if isinstance(matchup, dict) and 'matchup' in matchup:
-                    matchup_info = matchup['matchup']
-                    
-                    # Extract team data
-                    teams = matchup_info['0']['teams']
-                    
-                    team1 = teams['0']['team'][0]
-                    team2 = teams['1']['team'][0]
-                    
-                    team1_stats = self._extract_team_stats(teams['0']['team'][1])
-                    team2_stats = self._extract_team_stats(teams['1']['team'][1])
-                    
-                    matchup_data.append({
-                        'week': week,
-                        'team1_id': team1[0]['team_id'],
-                        'team1_name': team1[2]['name'],
-                        'team1_stats': team1_stats,
-                        'team2_id': team2[0]['team_id'],
-                        'team2_name': team2[2]['name'],
-                        'team2_stats': team2_stats
-                    })
-                    
-                    logger.debug(f"Collected matchup: {team1[2]['name']} vs {team2[2]['name']}")
+
+            league_data = matchups.get('fantasy_content', {}).get('league', [])
+            scoreboard_obj = next(
+                (item for item in league_data if isinstance(item, dict) and 'scoreboard' in item),
+                None
+            )
+            if not scoreboard_obj:
+                logger.warning("No scoreboard found in matchup response")
+                return []
+
+            scoreboard_data = scoreboard_obj['scoreboard']
+            week_data = scoreboard_data.get('0') or next(
+                (v for v in scoreboard_data.values() if isinstance(v, dict) and 'matchups' in v),
+                None
+            )
+            if not week_data:
+                logger.warning("No week data found in scoreboard")
+                return []
+
+            raw_matchups = week_data['matchups']
+            if isinstance(raw_matchups, dict):
+                matchup_items = (v for v in raw_matchups.values() if isinstance(v, dict))
+            elif isinstance(raw_matchups, list):
+                matchup_items = iter(raw_matchups)
+            else:
+                logger.warning("Unexpected matchups structure: %s", type(raw_matchups))
+                return []
+
+            for matchup in matchup_items:
+                if not isinstance(matchup, dict) or 'matchup' not in matchup:
+                    continue
+
+                matchup_info = matchup['matchup']
+                if isinstance(matchup_info, dict):
+                    matchup_body = matchup_info.get('0') or next(
+                        (v for v in matchup_info.values() if isinstance(v, dict) and 'teams' in v),
+                        None
+                    )
+                else:
+                    continue
+
+                if not matchup_body or 'teams' not in matchup_body:
+                    continue
+
+                teams = matchup_body['teams']
+                team_list = [
+                    v['team'] for k, v in teams.items()
+                    if k != 'count' and isinstance(v, dict) and 'team' in v
+                ]
+                if len(team_list) < 2:
+                    logger.warning("Expected 2 teams in matchup, got %d", len(team_list))
+                    continue
+
+                team1_raw = team_list[0]
+                team2_raw = team_list[1]
+
+                team1_info = team1_raw[0] if isinstance(team1_raw, list) else team1_raw
+                team2_info = team2_raw[0] if isinstance(team2_raw, list) else team2_raw
+                team1_stats_raw = team1_raw[1] if isinstance(team1_raw, list) and len(team1_raw) > 1 else {}
+                team2_stats_raw = team2_raw[1] if isinstance(team2_raw, list) and len(team2_raw) > 1 else {}
+
+                team1_stats = self._extract_team_stats(team1_stats_raw)
+                team2_stats = self._extract_team_stats(team2_stats_raw)
+
+                team1_id = self._find_in_team_info(team1_info, 'team_id')
+                team1_name = self._find_in_team_info(team1_info, 'name')
+                team2_id = self._find_in_team_info(team2_info, 'team_id')
+                team2_name = self._find_in_team_info(team2_info, 'name')
+
+                if team1_id is None or team2_id is None:
+                    logger.warning("Missing team ID in matchup (team1=%r team2=%r), skipping", team1_id, team2_id)
+                    continue
+
+                matchup_data.append({
+                    'week': week,
+                    'team1_id': team1_id,
+                    'team1_name': team1_name,
+                    'team1_stats': team1_stats,
+                    'team2_id': team2_id,
+                    'team2_name': team2_name,
+                    'team2_stats': team2_stats,
+                })
+
+                logger.debug(f"Collected matchup: {team1_name} vs {team2_name}")
             
             logger.info(f"Collected {len(matchup_data)} matchups")
             return matchup_data
@@ -112,58 +182,47 @@ class FantasyDataCollector:
             logger.error(f"Error collecting matchup data: {e}")
             raise
     
+    def _extract_player_name(self, player):
+        """Extract player name handling both string and dict formats from Yahoo API."""
+        name = player.get('name', 'Unknown')
+        if isinstance(name, dict):
+            return name.get('full', 'Unknown')
+        return name if isinstance(name, str) else 'Unknown'
+
+    def _find_in_team_info(self, team_info, key):
+        """Search a Yahoo team info list for a value by key, regardless of position."""
+        if isinstance(team_info, list):
+            for item in team_info:
+                if isinstance(item, dict) and key in item:
+                    return item[key]
+        elif isinstance(team_info, dict):
+            return team_info.get(key)
+        return None
+
     def _extract_team_stats(self, team_data):
         """Extract stats from team data structure."""
         stats = {}
-        
+
         try:
             if 'team_stats' in team_data:
-                for stat in team_data['team_stats']['stats']:
+                stats_raw = team_data['team_stats']['stats']
+                if isinstance(stats_raw, dict):
+                    stat_items = [v for k, v in stats_raw.items() if k != 'count' and isinstance(v, dict)]
+                elif isinstance(stats_raw, list):
+                    stat_items = stats_raw
+                else:
+                    stat_items = []
+
+                for stat in stat_items:
                     if 'stat' in stat:
                         stat_info = stat['stat']
                         stat_id = stat_info.get('stat_id')
                         value = stat_info.get('value', 0)
-                        
-                        # Map stat_id to readable names (these are Yahoo's stat IDs)
-                        # Reference: https://yahoo-fantasy-node-docs.vercel.app/resource/game/stat_categories
-                        stat_map = {
-                            # Batting stats (currently collected + Yahoo points additions)
-                            '7': 'R',      # Runs
-                            '8': 'H',      # Hits
-                            '9': '1B',     # Singles
-                            '10': '2B',    # Doubles
-                            '11': '3B',    # Triples
-                            '12': 'HR',    # Home Runs
-                            '13': 'RBI',   # RBI
-                            '16': 'SB',    # Stolen Bases
-                            '18': 'BB',    # Walks
-                            '20': 'HBP',   # Hit by Pitch
-                            '3': 'AVG',    # Batting Average
-                            '6': 'AB',     # At Bats
-                            '17': 'CS',    # Caught Stealing
-                            '21': 'K_BAT', # Strikeouts (batting) - renamed to avoid clash with pitching K
-                            
-                            # Pitching stats (currently collected + Yahoo points additions)
-                            '28': 'W',     # Wins
-                            '32': 'SV',    # Saves
-                            '42': 'K',     # Strikeouts
-                            '26': 'ERA',   # ERA
-                            '27': 'WHIP',  # WHIP
-                            '33': 'O',     # Outs (needed for Yahoo points: O × 1)
-                            '34': 'H_PIT', # Hits allowed
-                            '37': 'ER',    # Earned Runs
-                            '39': 'BB_PIT',# Walks allowed
-                            '41': 'HBP_PIT',# Hit by Pitch (pitching)
-                            '50': 'IP',    # Innings Pitched (composite from outs)
-                            '29': 'L',     # Losses
-                            '48': 'HLD'    # Holds
-                        }
-                        
-                        if stat_id in stat_map:
-                            stats[stat_map[stat_id]] = value
+                        if stat_id in STAT_MAP:
+                            stats[STAT_MAP[stat_id]] = value
         except Exception as e:
             logger.warning(f"Error extracting team stats: {e}")
-        
+
         return stats
     
     def collect_player_data(self, week=None):
@@ -208,7 +267,7 @@ class FantasyDataCollector:
                             'team_id': team_id,
                             'team_name': team_name,
                             'player_id': player.get('player_id'),
-                            'player_name': player.get('name', {}).get('full', 'Unknown'),
+                            'player_name': self._extract_player_name(player),
                             'position': ','.join(player.get('eligible_positions', [])),
                             'stats': self._extract_player_stats(player)
                         }
@@ -227,32 +286,27 @@ class FantasyDataCollector:
     def _extract_player_stats(self, player_data):
         """Extract stats from player data structure."""
         stats = {}
-        
+
         try:
             if 'player_stats' in player_data:
-                for stat in player_data['player_stats'].get('stats', []):
+                stats_raw = player_data['player_stats'].get('stats', [])
+                if isinstance(stats_raw, dict):
+                    stat_items = [v for k, v in stats_raw.items() if k != 'count' and isinstance(v, dict)]
+                elif isinstance(stats_raw, list):
+                    stat_items = stats_raw
+                else:
+                    stat_items = []
+
+                for stat in stat_items:
                     if 'stat' in stat:
                         stat_info = stat['stat']
                         stat_id = stat_info.get('stat_id')
                         value = stat_info.get('value', 0)
-                        
-                        # Same mapping as team stats
-                        stat_map = {
-                            # Batting
-                            '7': 'R', '8': 'H', '9': '1B', '10': '2B', '11': '3B',
-                            '12': 'HR', '13': 'RBI', '16': 'SB', '18': 'BB', '20': 'HBP',
-                            '3': 'AVG', '6': 'AB', '17': 'CS', '21': 'K_BAT',
-                            # Pitching
-                            '28': 'W', '32': 'SV', '42': 'K', '26': 'ERA', '27': 'WHIP',
-                            '33': 'O', '34': 'H_PIT', '37': 'ER', '39': 'BB_PIT',
-                            '41': 'HBP_PIT', '50': 'IP', '29': 'L', '48': 'HLD'
-                        }
-                        
-                        if stat_id in stat_map:
-                            stats[stat_map[stat_id]] = value
+                        if stat_id in STAT_MAP:
+                            stats[STAT_MAP[stat_id]] = value
         except Exception as e:
             logger.warning(f"Error extracting player stats: {e}")
-        
+
         return stats
     
     def save_daily_snapshot(self, snapshot_date=None, week=None):
@@ -263,9 +317,12 @@ class FantasyDataCollector:
             snapshot_date: Date of snapshot (defaults to today)
             week: Week number (defaults to current week)
         """
+        if not self.league:
+            raise RuntimeError("Must call connect() before collecting data")
+
         if snapshot_date is None:
             snapshot_date = date.today()
-        
+
         if week is None:
             week = self.league.current_week()
         
@@ -273,7 +330,11 @@ class FantasyDataCollector:
         
         # Collect matchup data
         matchup_data = self.collect_matchup_data(week)
-        
+
+        if not matchup_data:
+            logger.warning("No matchup data collected — skipping player data collection to avoid DB inconsistency")
+            return
+
         # Save matchup snapshots
         for matchup in matchup_data:
             self.db.save_matchup_snapshot(

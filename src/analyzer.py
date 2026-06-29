@@ -114,7 +114,7 @@ class CompositeScorer:
                 f"Invalid method '{method}'. Must be one of: {self.VALID_METHODS}"
             )
         self.method = method
-        self.weights = weights or self.DEFAULT_WEIGHTS
+        self.weights = weights if weights is not None else dict(self.DEFAULT_WEIGHTS)
     
     def score_players(self, players, stat_categories):
         """

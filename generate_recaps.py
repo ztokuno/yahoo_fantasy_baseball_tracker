@@ -84,7 +84,7 @@ Examples:
         recap_date = date.fromisoformat(args.date) if args.date else date.today()
         
         try:
-            output = visualizer.generate_daily_recap(args.week, recap_date)
+            output = visualizer.generate_daily_recap_image(args.week, recap_date)
             if output:
                 print(f"✓ Daily recap saved to: {output}")
                 print()
@@ -100,9 +100,11 @@ Examples:
         print(f"Generating weekly recap for week {args.week}...")
         
         try:
-            output = visualizer.generate_weekly_recap(args.week)
+            output = visualizer.generate_weekly_recap_image(args.week)
             if output:
-                print(f"✓ Weekly recap saved to: {output}")
+                print(f"✓ Weekly recap generated ({len(output)} images):")
+                for path in output:
+                    print(f"  - {path}")
                 print()
             else:
                 print("✗ Failed to generate weekly recap (no data available)")

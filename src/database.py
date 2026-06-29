@@ -375,13 +375,17 @@ class FantasyDatabase:
         """Calculate the difference between two stat dictionaries."""
         delta = {}
         for stat, value in current_stats.items():
+            try:
+                curr = float(value)
+            except (ValueError, TypeError):
+                curr = 0.0
             if stat in previous_stats:
                 try:
-                    delta[stat] = float(value) - float(previous_stats[stat])
+                    delta[stat] = curr - float(previous_stats[stat])
                 except (ValueError, TypeError):
-                    delta[stat] = value
+                    delta[stat] = curr
             else:
-                delta[stat] = value
+                delta[stat] = curr
         return delta
 
 
