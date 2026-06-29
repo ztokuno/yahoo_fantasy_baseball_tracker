@@ -1,6 +1,7 @@
 # Credentials and sensitive files
 config/credentials.json
 config/oauth2.json
+config/config.yaml
 *.token
 
 # Database files
